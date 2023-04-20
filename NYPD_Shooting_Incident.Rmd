@@ -1,0 +1,278 @@
+---
+title: "NYPD Shooting Incident"
+author: "J.Swarr"
+date: "2023-03-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Import Data
+
+We will begin by importing the raw data.
+
+```{r Import Data, message=FALSE}
+library(tidyverse)
+
+Shooting_incidents = read_csv('https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD')
+```
+
+## Examine Data
+
+Next, we will take a look at the dataset, and determine what areas could use tidying prior to visualization and analysis.
+
+```{r Examine Dataset, message=FALSE}
+Shooting_incidents
+
+colnames(Shooting_incidents)
+
+summary(Shooting_incidents)
+```
+
+## Tidy Dataset for Analysis
+
+After examining the data, it was determined that there were several columns in the current data that had a large number of rows with missing values (shown as 'NA'). Specifically, columns with less data present are: "LOCATION_DESC", "PERP_AGE_GROUP", "PERP_SEX", and "PERP_RACE". I am going to remove these columns from the dataset for analysis. 
+
+I am also going to convert the 'Statistical Murder Flag' logical value to a death count (1 if the Statistical Murder Flag was set to 'True', and 0 if it was set to 'False'). This will allow me to look at death count versus incident count in future analysis.
+
+I also saw that 'OCCUR_DATE' is not in a 'date' format. I will reformat this variable into the proper format. 
+
+I also want to remove JURISDICTION_CODE, X_COORD_CD and Y_COORD_CD, Latitude, Longitude, and Lon_Lat - as I'm not going to use them in my analysis.
+
+
+```{r Tidy Dataset for Analysis, message=FALSE}
+
+Shooting_incidents$STATISTICAL_MURDER_FLAG <- as.integer(Shooting_incidents$STATISTICAL_MURDER_FLAG)
+
+Shooting_incidents <- Shooting_incidents %>%
+  mutate(OCCUR_DATE = mdy(OCCUR_DATE)) %>%
+  mutate(INCIDENT_COUNT = 1) %>%
+  select(-c(LOCATION_DESC, JURISDICTION_CODE, PERP_AGE_GROUP, PERP_SEX, PERP_RACE, X_COORD_CD, Y_COORD_CD, Latitude, Longitude, Lon_Lat))
+
+summary(Shooting_incidents)
+```
+
+## Grouping Data 
+
+Next, I want to create a new dataset for use in data analysis and visualization. 
+
+In the first dataset, I am going to group the data by date and borough. I am also adding Year, for use in the second dataset. 
+
+In the second dataset, I am grouping the data by Year and Borough, so year-over-year trends can be examined. I'm also adding a 'Decade' and 'Combined Key' column, for future joining with Population data.
+
+```{r Create Grouped Datasets, message=FALSE}
+Shooting_Incidents_by_Date <- Shooting_incidents %>%
+  group_by(OCCUR_DATE, BORO) %>%
+  summarize(INCIDENTS = sum(INCIDENT_COUNT), DEATHS = sum(STATISTICAL_MURDER_FLAG)) %>%
+  mutate(YEAR = year(OCCUR_DATE)) %>%
+  ungroup()
+
+Shooting_Incidents_by_Date
+
+summary(Shooting_Incidents_by_Date)
+
+Shooting_Incidents_by_Year <- Shooting_Incidents_by_Date %>%
+  group_by(YEAR, BORO) %>%
+  summarize(INCIDENTS = sum(INCIDENTS), DEATHS = sum(DEATHS)) %>%
+  mutate(DECADE = as.character(YEAR - YEAR %% 10)) %>%
+  unite("Combined_Key",
+        c(BORO, DECADE),
+        sep = ", ",
+        na.rm = TRUE,
+        remove = FALSE)%>%
+  ungroup()
+
+summary(Shooting_Incidents_by_Year)
+
+Shooting_Incidents_by_Year
+```
+
+## Import Population Data
+
+Next, let's import Population data per Boro and Decade, so we can look at deaths/incidents per thousand people in each location.
+
+
+```{r Import Pop, message = FALSE}
+
+Population_by_Borough = read_csv('https://data.cityofnewyork.us/api/views/xywu-7bv9/rows.csv?accessType=DOWNLOAD')
+
+Population_by_Borough
+summary(Population_by_Borough)
+
+```
+
+## Examine and Tidy Population Data
+
+Looking at a sample of the data above, I noticed this dataset needs to be cleaned in order to work with the current dataset. Specifically, I will need to perform the following steps.
+
+1. Create a combined key that can be used when joining the datasets, making sure the case of the text matches
+2. Remove extraneous columns (ones with 'Boro Share of NYC Total' and decades that have not yet occurred)
+3. Create a column for Decade, and insert the population values into a column called Population
+
+
+```{r Tidy Population Data, message = FALSE}
+Population_by_Borough$Borough <- toupper(Population_by_Borough$Borough)
+
+Population_by_Borough <- Population_by_Borough %>%
+  select(-contains('Boro share of NYC total')) %>%
+  select(-c('Age Group', '2030':'2040')) %>%
+  rename('BORO' = 'Borough') %>%
+  pivot_longer(cols = ('1950':'2020'),
+               names_to = 'DECADE',
+               values_to = 'POPULATION'
+               ) %>%
+  unite("Combined_Key",
+        c(BORO, DECADE),
+        sep = ", ",
+        na.rm = TRUE,
+        remove = FALSE) %>%
+  select('BORO', 'DECADE', 'Combined_Key', 'POPULATION')
+
+Population_by_Borough
+```
+
+## Joining the Datasets
+
+Now I can join the datasets! I will perform a left join, as I want to keep all of the columns from the Shooting_Incidents_by_Year dataset, and add the Population value. I will also need to make sure the code accounts for the fact that I will have multiples of the same Combined Key in the Shooting_Incidents_by_Year dataset, as there is currently a row for each Boro/Year combination. While I would have preferred to find population data for each Boro for every year, the data that was available for this project is grouped by decade. So, I will need to add the population information for each Boro for the decade that corresponds to the Year in question. 
+
+After joining, I will need to tidy the new dataset to remove columns I do not need, and rename columns that were renamed automatically during the join. I will also add columns for incidents per thousand people and deaths per thousand people. 
+
+
+```{r Join Population and Shooting Incidents, message = FALSE} 
+Incidents_by_Population <- left_join(Shooting_Incidents_by_Year, Population_by_Borough, by = c('Combined_Key' = 'Combined_Key'), multiple = 'all') %>%
+select('YEAR':'DECADE.x', 'POPULATION') %>% 
+rename('BORO' = 'BORO.x', 'DECADE' = 'DECADE.x') %>% 
+mutate(INCIDENTS_PER_THOUSAND = INCIDENTS * 1000 / POPULATION) %>%
+  mutate(DEATHS_PER_THOUSAND = DEATHS * 1000 / POPULATION)
+Incidents_by_Population 
+
+summary(Incidents_by_Population)
+```
+
+
+## Initial Data Visualization
+
+Now that my data has been initially tidied and joined, I'm going to perform some initial data visualization, to begin looking at associations in the data.
+
+First, let's look at the number of Incidents and Deaths per Year and Boro.
+
+```{r Initial Data Visualization, message=FALSE}
+ggplot(data = Shooting_Incidents_by_Year) +
+  geom_point(mapping = aes(x = YEAR, y = INCIDENTS)) +
+  geom_smooth(mapping = aes(x = YEAR, y = INCIDENTS)) +
+  geom_point(mapping = aes(x = YEAR, y = DEATHS, color = 'red')) +
+  geom_smooth(mapping = aes(x = YEAR, y = DEATHS, color = 'red')) +
+  facet_wrap(~ BORO, nrow = 2) +
+  ylab("Incidents and Deaths") +
+  xlab("Year")
+
+```
+
+Next, let's look at Incidents and Deaths per Thousand people in the population.
+
+
+```{r Data Vis Incidents and Deaths Per Thousand, message = FALSE}
+ggplot(data = Incidents_by_Population) + 
+  geom_point(mapping = aes(x = YEAR, y = INCIDENTS_PER_THOUSAND)) +
+  geom_smooth(mapping = aes(x = YEAR, y = INCIDENTS_PER_THOUSAND)) +
+  geom_point(mapping = aes(x = YEAR, y = DEATHS_PER_THOUSAND, color = 'red')) +
+  geom_smooth(mapping = aes(x = YEAR, y = DEATHS_PER_THOUSAND, color = 'red')) +
+  facet_wrap(~BORO, nrow = 2) +
+  ylab("Incidents and Deaths per Thousand") +
+  xlab("Year")
+
+```
+
+
+After looking at these initial visualizations, it seems there are certain Boros that have more shooting incidents than others per year. It also seems there are certain Boros with a higher rate of deaths per incident. 
+
+I'm going to perform some statistical analysis and modeling to better examine these relationships.
+
+## Statistical Analysis and Modeling
+
+First, I'm going to see if there is a statistically significant difference in shooting incidents and shooting deaths per thousand people between different Boros. My initial hypothesis is that the Bronx and Brooklyn have significantly more shooting incidents per year than the other Boros.
+
+```{r Statistical Test Incidents per Thousand by Boro, message = FALSE}
+res.aov <- aov(INCIDENTS_PER_THOUSAND ~ BORO, data = Incidents_by_Population)
+
+summary(res.aov)
+
+TukeyHSD(res.aov)
+```
+
+This shows me that the Bronx had significantly more incidents per thousand than the other Boros, and Brooklyn had significantly more incidents per thousand than all Boros other than the Bronx.
+
+Now I will analyze if there is a statistically significant difference in deaths per thousand people between Boros.
+
+
+```{r Statistical Test Deaths per Thousand by Boro, message = FALSE}
+res.aov.deaths <- aov(DEATHS_PER_THOUSAND ~ BORO, data = Incidents_by_Population)
+
+summary(res.aov.deaths)
+
+TukeyHSD(res.aov.deaths)
+```
+
+This shows me that the Bronx had significantly more deaths per thousand than the other Boros, and Brooklyn had significantly more deaths per thousand than all Boros other than the Bronx (though this relationship was much closer to being statistically insignificant based on the p-value being quite close to 0.05).
+
+# Modeling Overall Relationship Between Incidents and Deaths
+
+The next question I have is whether there is a linear relationship between incidents per thousand and deaths per thousand.
+
+I will begin with doing a quick visualization of the relationship.
+
+```{r Data Vis Deaths vs. Incidents Per Thou, message = FALSE}
+ggplot(data = Incidents_by_Population) +
+  geom_point(mapping = aes(x = INCIDENTS_PER_THOUSAND, y = DEATHS_PER_THOUSAND)) +
+  geom_smooth(mapping = aes(x = INCIDENTS_PER_THOUSAND, y = DEATHS_PER_THOUSAND)) +
+  ylab("Deaths per Thousand") +
+  xlab("Incidents per Thousand")
+```
+
+It seems like the relationships is close to being linear!
+
+I'm going to implement a linear model.
+
+```{r Model, message = FALSE}
+mod <- lm(DEATHS_PER_THOUSAND ~ INCIDENTS_PER_THOUSAND, data = Incidents_by_Population) 
+
+summary(mod)
+```
+
+My initial analysis of the model is that it is a good fit, as the difference in residuals stays pretty tightly around zero. 
+
+I want to finish this analysis by adding death per thousand predictions based on the linear model.
+
+# Adding Death Predictions to the Dataset Based on Model
+
+```{r Adding Predictions, message = FALSE}
+Incidents_by_Population <- Incidents_by_Population %>%
+  mutate(DEATH_PREDICTION = predict(mod))
+```
+
+Let's visualize, and see how well the predicted deaths per thousand matches the actual deaths per thousand by Boro.
+
+```{r Visualize Predictions, message = FALSE}
+ggplot(Incidents_by_Population) +
+  geom_point(mapping = aes(x = YEAR, y = DEATHS_PER_THOUSAND)) +
+  geom_point(mapping = aes(x = YEAR, y = DEATH_PREDICTION, color = 'red')) +
+  facet_wrap(~BORO, nrow = 2) +
+  ylab("Deaths Per Thousand") +
+  xlab("Year")
+```
+
+The prediction looks like a pretty good fit for most of the datapoints! 
+
+I will end my analysis here. If I were to continue, I would next be interested in looking at the datapoints that the model did not predict as well, particularly in the Bronx and Staten Island (as these Boros seemed to have the most points that did not match the predicted values for a given year). Specifically, I would want to see what other variables might impacting the relationship between incidents per thousand and deaths per thousand in those areas.
+
+# Discussion of Potential Bias
+
+When determining what data from the original dataset to analyze, I deliberately decided to focus on more objective data fields. I did this to minimize the potential for bias in the final analysis. Specifically, I think using perpetrator data could introduce bias to the analysis. Potentially, there is more perpetrator data gathered and recorded when the perpetrator is of a certain race or age range. 
+
+That being said, as I do not know all of the methodology that was used in collection of the initial data, there could be bias in how the data was collected and/or recorded by involved parties. For instance, if police officers collected and recorded data for incidents occurring in certain Boroughs more than other Boroughs, this would introduce implicit bias into any analysis done that tries to extrapolate the findings to the Boroughs that had less representation in the collected data.
+
+Finally, there could be bias in how the population data was introduced. As stated previously, the population data was only available per decade. Because of this, for incidents that occurred in Brooklyn in 2015 (for example), the population data that would be applied for the 'per thousand' calculations is the data that was collected in 2010. Potentially, there could have been a large increase in the population size in Brooklyn between 2010 and 2015, which would artificially inflate the incident/thousand rate for that Borough and year. Due to limitations in available data, this calculated risk was taken when analyzing the dataset.
+
+
